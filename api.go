@@ -1,4 +1,4 @@
-package GoogleGmail4Go
+package googlegmail4go
 
 import (
 	"context"
@@ -20,8 +20,8 @@ import (
 
 var ctx = context.Background()
 
-func Initialize(client *http.Client, subject string) *GoogleGmail {
-	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+func Initialize(option *option.Client, subject string) *GoogleGmail {
+	service, err := gmail.NewService(ctx, *option)
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
