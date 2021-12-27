@@ -1,4 +1,4 @@
-module github.com/boom3k/gmail4go
+module github.com/boom3k/googlemail4go
 
 go 1.17
 
