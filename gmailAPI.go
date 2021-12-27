@@ -12,7 +12,6 @@ import (
 	"io/ioutil"
 	"log"
 	"mime"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,7 +19,7 @@ import (
 
 var ctx = context.Background()
 
-func Initialize(option *option.Client, subject string) *GoogleGmail {
+func Initialize(option *option.ClientOption, subject string) *GoogleGmail {
 	service, err := gmail.NewService(ctx, *option)
 	if err != nil {
 		log.Println(err.Error())
