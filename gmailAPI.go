@@ -120,6 +120,12 @@ func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject,
 	message.Raw = strings.Replace(message.Raw, "/", "_", -1)
 	message.Raw = strings.Replace(message.Raw, "+", "-", -1)
 	message.Raw = strings.Replace(message.Raw, "=", "", -1)
+	totalAttachments := 0
+	if filePaths != nil {
+		totalAttachments += len(filePaths)
+	}
+
+	log.Printf("Email sent ->\nTo: %s\nFrom:%s<%s>\nSubject:%s\nTotal Attachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
 
 	response, err := receiver.Service.
 		Users.
@@ -132,11 +138,8 @@ func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject,
 		log.Println(err.Error())
 		panic(err)
 	}
-	totalAttachments := 0
-	if filePaths != nil {
-		totalAttachments += len(filePaths)
-	}
-	log.Printf("GmailMessage sent:\nTo: %s\nFrom:%s<%s>\nSubject:%s\nAttachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
+
+	log.Printf("GmailMessage sent ->\nTo: %s\nFrom:%s<%s>\nSubject:%s\nTotal Attachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
 
 	return response
 }
