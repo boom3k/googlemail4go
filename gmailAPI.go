@@ -1,4 +1,4 @@
-package googlegmail4go
+package googlemail4go
 
 import (
 	"context"
