@@ -3,15 +3,13 @@ package googlemail4go
 import (
 	"context"
 	"encoding/base64"
-	"github.com/thanhpk/randstr"
-
 	"fmt"
+	"github.com/thanhpk/randstr"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
-	"io/ioutil"
 	"log"
-	"mime"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -53,19 +51,35 @@ type GmailMessagePayload struct {
 	Body            string
 }
 
+type EmailAttachment struct {
+	Filename   string
+	Extenstion string
+	Data       []byte
+	MimeType   string
+}
+
 type GmailMessage struct {
-	Body            string
-	FromName        string
-	Subject         string
-	To              []string
-	Cc              []string
-	Bcc             []string
-	AttachmentPaths []string
-	SendX           func()
+	Body        string
+	FromName    string
+	Subject     string
+	To          []string
+	Cc          []string
+	Bcc         []string
+	Attachments []EmailAttachment
 }
 
 func (email *GmailMessage) Send(googleGmail *GoogleGmail) {
 	googleGmail.SendEmail(email)
+}
+
+func (email *GmailMessage) AddAttachment(fileNameWithExtension string, data []byte) *GmailMessage {
+	email.Attachments = append(email.Attachments, EmailAttachment{
+		Filename:   fileNameWithExtension,
+		Data:       data,
+		MimeType:   http.DetectContentType(data),
+		Extenstion: filepath.Ext(fileNameWithExtension),
+	})
+	return email
 }
 
 func (receiver *GoogleGmail) SendEmail(email *GmailMessage) {
@@ -76,10 +90,10 @@ func (receiver *GoogleGmail) SendEmail(email *GmailMessage) {
 	} else if email.Subject == "" {
 		log.Printf("No subject for email [%s}!!\n", email)
 	}
-	receiver.SendRawEmail(email.To, email.Cc, email.Bcc, email.FromName, email.Subject, email.Body, email.AttachmentPaths)
+	receiver.SendRawEmail(email.To, email.Cc, email.Bcc, email.FromName, email.Subject, email.Body, email.Attachments)
 }
 
-func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject, bodyHtml string, filePaths []string) *gmail.Message {
+func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject, bodyHtml string, attachments []EmailAttachment) *gmail.Message {
 	message := &gmail.Message{}
 
 	boundary := randstr.Base64(32)
@@ -97,22 +111,14 @@ func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject,
 		bodyHtml + "\n\n" +
 		"--" + boundary + "\n"
 
-	for i, attachmentPath := range filePaths {
-		log.Printf("Attaching file [%d] of [%d]: %s", i, len(filePaths)-1, attachmentPath)
-		fileData, err := ioutil.ReadFile(attachmentPath)
-		if err != nil {
-			log.Println(err.Error())
-			panic(err)
-		}
-		fileName := filepath.Base(attachmentPath)
-		ext := filepath.Ext(fileName)
-		mimeExtension := mime.TypeByExtension(ext)
+	for i, attachment := range attachments {
 
-		messageBody += "Content-Type: " + mimeExtension + "; SendEmail=" + string('"') + fileName + string('"') + " \n" +
+		log.Printf("Attaching file [%d] of [%d]: %s", i, len(attachments)-1, attachment.Filename)
+		messageBody += "Content-Type: " + attachment.MimeType + "; SendEmail=" + string('"') + attachment.Filename + string('"') + " \n" +
 			"MIME-Version: 1.0\n" +
 			"Content-Transfer-Encoding: base64\n" +
-			"Content-Disposition: attachment; filename=" + string('"') + fileName + string('"') + " \n" +
-			chunkSplit(base64.RawStdEncoding.EncodeToString(fileData), 76, "\n") + "--" + boundary + "\n"
+			"Content-Disposition: attachment; filename=" + string('"') + attachment.Filename + string('"') + " \n" +
+			chunkSplit(base64.RawStdEncoding.EncodeToString(attachment.Data), 76, "\n") + "--" + boundary + "\n"
 	}
 
 	rawMessage := []byte(messageBody)
@@ -121,8 +127,8 @@ func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject,
 	message.Raw = strings.Replace(message.Raw, "+", "-", -1)
 	message.Raw = strings.Replace(message.Raw, "=", "", -1)
 	totalAttachments := 0
-	if filePaths != nil {
-		totalAttachments += len(filePaths)
+	if attachments != nil {
+		totalAttachments += len(attachments)
 	}
 
 	log.Printf("Email sent ->\nTo: %s\nFrom:%s<%s>\nSubject:%s\nTotal Attachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
