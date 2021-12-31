@@ -72,6 +72,14 @@ func (email *GmailMessage) Send(googleGmail *GoogleGmail) {
 	googleGmail.SendEmail(email)
 }
 
+func NewMessage(to []string, subject, body string) *GmailMessage {
+	return &GmailMessage{
+		To:      to,
+		Subject: subject,
+		Body:    body,
+	}
+}
+
 func (email *GmailMessage) AddAttachment(fileNameWithExtension string, data []byte) *GmailMessage {
 	email.Attachments = append(email.Attachments, EmailAttachment{
 		Filename:   fileNameWithExtension,
