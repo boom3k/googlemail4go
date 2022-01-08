@@ -2,7 +2,6 @@ package googlemail4go
 
 import (
 	"context"
-	_ "embed"
 	"encoding/base64"
 	"fmt"
 	"github.com/thanhpk/randstr"
@@ -16,35 +15,7 @@ import (
 	"sync"
 )
 
-//go:embed client_secret.json
-var client_secret []byte
-
-//go:embed token.json
-var token []byte
-
 var ctx = context.Background()
-
-//func main() {
-//	oauth2Token := &oauth2.Token{}
-//	json.Unmarshal(token, oauth2Token)
-//	config, _ := google.ConfigFromJSON(client_secret)
-//	api := Build(config.Client(context.Background(), oauth2Token), "ramel@ocie.io")
-//	rfc8222MsgID := ""
-//	body, attachments := api.ExportEmail(rfc8222MsgID)
-//	os.Mkdir(rfc8222MsgID, os.ModePerm)
-//	os.WriteFile(rfc8222MsgID+string(os.PathSeparator)+rfc8222MsgID+".eml", body, os.ModePerm)
-//	if attachments != nil {
-//		for _, attachment := range attachments {
-//			os.WriteFile(rfc8222MsgID+string(os.PathSeparator)+attachment.Filename, attachment.Data, os.ModePerm)
-//		}
-//	}
-//
-//	//a1, _ := ioutil.ReadFile(".gitignore")
-//	//message := NewMessage([]string{"boomboom3k@gmail.com"}, "Test - "+time.Now().String(), "BODY").AddAttachment(".gitignore", a1)
-//	//response, payload := api.SendMessage(message)
-//	//x := strings.Join(response.ServerResponse.Header["Date"], " ")
-//	//log.Println(message, payload, response, x)
-//}
 
 func Build(client *http.Client, subject string) *GoogleGmail {
 	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
