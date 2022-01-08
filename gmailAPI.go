@@ -1,5 +1,4 @@
-//package googlemail4go
-//package main
+package googlemail4go
 
 import (
 	"context"
