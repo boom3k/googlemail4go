@@ -17,7 +17,7 @@ import (
 
 var ctx = context.Background()
 
-func Build(client *http.Client, subject string) *GoogleGmail {
+func (receiver *GmailAPI) Build(client *http.Client, subject string) *GmailAPI {
 	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Println(err.Error())
@@ -26,16 +26,25 @@ func Build(client *http.Client, subject string) *GoogleGmail {
 
 	delegatesService := gmail.NewUsersSettingsDelegatesService(service)
 	if delegatesService == nil {
-		log.Println("No Deleagets Service!")
+		log.Println("No Deleagets GmailService!")
 	}
-	log.Printf("Initialized GoogleGmail4Go as (%s)\n", subject)
-	return &GoogleGmail{Service: service, Subject: subject}
+	receiver.GmailService = service
+	receiver.DelegatesService = delegatesService
+	receiver.Subject = subject
+	log.Printf("GmailAPI --> \n"+
+		"\tGmailService: %v\n"+
+		"\tDelegatesService: %v\n"+
+		"\tUserEmail: %s\n", &receiver.GmailService, &receiver.DelegatesService, subject)
+	return receiver
 }
 
-type GoogleGmail struct {
-	Service          *gmail.Service
+type GmailAPI struct {
+	GmailService     *gmail.Service
 	DelegatesService *gmail.UsersSettingsDelegatesService
 	Subject          string
+}
+
+type Delegate struct {
 }
 
 type GmailMessagePayload struct {
@@ -78,10 +87,10 @@ func NewMessage(to []string, subject, body string) *GmailMessage {
 	}
 }
 
-func (receiver *GoogleGmail) QueryMessages(query string) []*gmail.Message {
+func (receiver *GmailAPI) QueryMessages(query string) []*gmail.Message {
 	log.Println("User [" + receiver.Subject + "]: Gmail.Messages.List.Query{\"" + query + "\"}")
 	messagesListCall := receiver.
-		Service.
+		GmailService.
 		Users.
 		Messages.
 		List(receiver.Subject).
@@ -108,18 +117,18 @@ func (receiver *GoogleGmail) QueryMessages(query string) []*gmail.Message {
 	return messages
 }
 
-func (receiver GoogleGmail) GetMessageByRFC822MsgID(rfc822MsgID string) *gmail.Message {
+func (receiver GmailAPI) GetMessageByRFC822MsgID(rfc822MsgID string) *gmail.Message {
 	return receiver.QueryMessages("rfc822msgid:" + rfc822MsgID)[0]
 }
 
-func (receiver *GoogleGmail) ExportEmail(rfc822MsgID string) ([]byte, []EmailAttachment) {
+func (receiver *GmailAPI) ExportEmail(rfc822MsgID string) ([]byte, []EmailAttachment) {
 	html := ""
 	var emailBodyData []byte
 	var attachments []EmailAttachment
 	message := receiver.GetMessageByRFC822MsgID(rfc822MsgID)
 
 	//Get the threads using that message ID
-	threads, err := receiver.Service.Users.Threads.Get(receiver.Subject, message.ThreadId).Fields("*").Do()
+	threads, err := receiver.GmailService.Users.Threads.Get(receiver.Subject, message.ThreadId).Fields("*").Do()
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
@@ -139,9 +148,9 @@ func (receiver *GoogleGmail) ExportEmail(rfc822MsgID string) ([]byte, []EmailAtt
 	//for _, message := range messages {
 	//	payload := receiver.GetPayload(message.ThreadId)
 	//	log.Println(payload)
-	//	ts, _ := receiver.Service.Users.Threads.Get(receiver.Subject, message.ThreadId).Do()
+	//	ts, _ := receiver.GmailService.Users.Threads.Get(receiver.Subject, message.ThreadId).Do()
 	//	log.Println(ts)
-	//	rawMessage, err := receiver.Service.Users.Messages.Get(receiver.Subject, message.ThreadId).Fields("*").Format("raw").Do()
+	//	rawMessage, err := receiver.GmailService.Users.Messages.Get(receiver.Subject, message.ThreadId).Fields("*").Format("raw").Do()
 	//	if err != nil {
 	//		log.Println(err.Error())
 	//		panic(err)
@@ -157,7 +166,7 @@ func (receiver *GoogleGmail) ExportEmail(rfc822MsgID string) ([]byte, []EmailAtt
 	return emailBodyData, attachments
 }
 
-func (email *GmailMessage) Send(googleGmail *GoogleGmail) (*gmail.Message, GmailMessagePayload) {
+func (email *GmailMessage) Send(googleGmail *GmailAPI) (*gmail.Message, GmailMessagePayload) {
 	return googleGmail.SendMessage(email)
 }
 
@@ -171,7 +180,7 @@ func (email *GmailMessage) AddAttachment(fileNameWithExtension string, data []by
 	return email
 }
 
-func (receiver *GoogleGmail) SendMessage(email *GmailMessage) (*gmail.Message, GmailMessagePayload) {
+func (receiver *GmailAPI) SendMessage(email *GmailMessage) (*gmail.Message, GmailMessagePayload) {
 	if email.To == nil {
 		log.Printf("No Recipients for email [%s]!!\n", email)
 	} else if email.Body == "" {
@@ -182,7 +191,7 @@ func (receiver *GoogleGmail) SendMessage(email *GmailMessage) (*gmail.Message, G
 	return receiver.SendRawEmail(email.To, email.Cc, email.Bcc, email.FromName, email.Subject, email.Body, email.Attachments)
 }
 
-func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject, bodyHtml string, attachments []EmailAttachment) (*gmail.Message, GmailMessagePayload) {
+func (receiver *GmailAPI) SendRawEmail(to, cc, bcc []string, sender, subject, bodyHtml string, attachments []EmailAttachment) (*gmail.Message, GmailMessagePayload) {
 	message := &gmail.Message{}
 
 	boundary := randstr.Base64(32)
@@ -222,7 +231,7 @@ func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject,
 
 	log.Printf("Sending Email ->\nTo: %s\nFrom:%s<%s>\nSubject:%s\nTotal Attachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
 
-	response, err := receiver.Service.
+	response, err := receiver.GmailService.
 		Users.
 		Messages.
 		Send(receiver.Subject, message).
@@ -239,7 +248,7 @@ func (receiver *GoogleGmail) SendRawEmail(to, cc, bcc []string, sender, subject,
 	return response, receiver.GetPayload(response.ThreadId)
 }
 
-func (receiver *GoogleGmail) GetDelegates() []*gmail.Delegate {
+func (receiver *GmailAPI) GetDelegates() []*gmail.Delegate {
 	response, err := receiver.DelegatesService.List(receiver.Subject).Do()
 	if err != nil {
 		log.Println(err.Error())
@@ -248,8 +257,8 @@ func (receiver *GoogleGmail) GetDelegates() []*gmail.Delegate {
 	return response.Delegates
 }
 
-func (receiver *GoogleGmail) AddDelegate(newDelegates string) *gmail.Delegate {
-	response, err := receiver.Service.Users.Settings.Delegates.Create(receiver.Subject, &gmail.Delegate{DelegateEmail: newDelegates}).Do()
+func (receiver *GmailAPI) AddDelegate(newDelegates string) *gmail.Delegate {
+	response, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, &gmail.Delegate{DelegateEmail: newDelegates}).Do()
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
@@ -257,7 +266,7 @@ func (receiver *GoogleGmail) AddDelegate(newDelegates string) *gmail.Delegate {
 	return response
 }
 
-func (receiver *GoogleGmail) GetMessageHeaders(query string) []GmailMessagePayload {
+func (receiver *GmailAPI) GetMessageHeaders(query string) []GmailMessagePayload {
 	messages := receiver.QueryMessages(query)
 	var gmailMessagePayloads []GmailMessagePayload
 	counter := 0
@@ -293,9 +302,9 @@ func (receiver *GoogleGmail) GetMessageHeaders(query string) []GmailMessagePaylo
 	return gmailMessagePayloads
 }
 
-func (receiver *GoogleGmail) GetPayload(messageID string) GmailMessagePayload {
+func (receiver *GmailAPI) GetPayload(messageID string) GmailMessagePayload {
 	log.Println("Pulling [" + receiver.Subject + "] Gmail MsgId: " + messageID)
-	response, err := receiver.Service.Users.Messages.Get(receiver.Subject, messageID).Fields("*").Do()
+	response, err := receiver.GmailService.Users.Messages.Get(receiver.Subject, messageID).Fields("*").Do()
 	if err != nil {
 		ger := GetGoogleErrorResponse(err)
 		log.Println(ger.Message, ger.Details)
@@ -324,7 +333,7 @@ func (receiver *GoogleGmail) GetPayload(messageID string) GmailMessagePayload {
 	}
 }
 
-func (receiver *GoogleGmail) GetMessageAttachmentsByRFC822MGSID(rfc822MsgID string) []EmailAttachment {
+func (receiver *GmailAPI) GetMessageAttachmentsByRFC822MGSID(rfc822MsgID string) []EmailAttachment {
 	var attachments []EmailAttachment
 	for _, message := range receiver.QueryMessages("rfc822msgid:" + rfc822MsgID) {
 		attachments = append(attachments, receiver.GetMessageAttachments(message.ThreadId)...)
@@ -332,10 +341,10 @@ func (receiver *GoogleGmail) GetMessageAttachmentsByRFC822MGSID(rfc822MsgID stri
 	return attachments
 }
 
-func (receiver *GoogleGmail) GetMessageAttachments(threadId string) []EmailAttachment {
+func (receiver *GmailAPI) GetMessageAttachments(threadId string) []EmailAttachment {
 	//Get message by its thread id
 	var attachments []EmailAttachment
-	response, err := receiver.Service.Users.Threads.Get(receiver.Subject, threadId).Fields("*").Do()
+	response, err := receiver.GmailService.Users.Threads.Get(receiver.Subject, threadId).Fields("*").Do()
 	if err != nil {
 		log.Println(err.Error())
 		return nil
@@ -343,7 +352,7 @@ func (receiver *GoogleGmail) GetMessageAttachments(threadId string) []EmailAttac
 	for _, message := range response.Messages {
 		for _, messagePart := range message.Payload.Parts {
 			if messagePart.Filename != "" {
-				attachmentResponse, err := receiver.Service.
+				attachmentResponse, err := receiver.GmailService.
 					Users.
 					Messages.
 					Attachments.
@@ -374,7 +383,7 @@ func (receiver *GoogleGmail) GetMessageAttachments(threadId string) []EmailAttac
 	return attachments
 }
 
-func (receiver *GoogleGmail) GetLabel(labelName string) *gmail.Label {
+func (receiver *GmailAPI) GetLabel(labelName string) *gmail.Label {
 	for _, label := range receiver.GetAllLabels() {
 		if label.Name == labelName {
 			return label
@@ -383,8 +392,8 @@ func (receiver *GoogleGmail) GetLabel(labelName string) *gmail.Label {
 	return nil
 }
 
-func (receiver *GoogleGmail) GetAllLabels() []*gmail.Label {
-	listLabelsResponse, labelsListErr := receiver.Service.Users.Labels.List(receiver.Subject).Do()
+func (receiver *GmailAPI) GetAllLabels() []*gmail.Label {
+	listLabelsResponse, labelsListErr := receiver.GmailService.Users.Labels.List(receiver.Subject).Do()
 	if labelsListErr != nil {
 		log.Println(labelsListErr.Error())
 		panic(labelsListErr)
