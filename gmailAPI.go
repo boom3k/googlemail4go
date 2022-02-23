@@ -15,15 +15,12 @@ import (
 	"sync"
 )
 
-var ctx = context.Background()
-
-func BuildNewGmailAPI(client *http.Client, subject string) *GmailAPI {
+func BuildNewGmailAPI(client *http.Client, subject string, ctx context.Context) *GmailAPI {
 	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
 	}
-
 	newGmailAPI := &GmailAPI{}
 	newGmailAPI.GmailService = gmailService
 	newGmailAPI.Subject = subject
