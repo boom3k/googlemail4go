@@ -17,34 +17,23 @@ import (
 
 var ctx = context.Background()
 
-func (receiver *GmailAPI) Build(client *http.Client, subject string) *GmailAPI {
-	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+func BuildNewGmailAPI(client *http.Client, subject string) *GmailAPI {
+	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
 	}
 
-	delegatesService := gmail.NewUsersSettingsDelegatesService(service)
-	if delegatesService == nil {
-		log.Println("No Deleagets GmailService!")
-	}
-	receiver.GmailService = service
-	receiver.DelegatesService = delegatesService
-	receiver.Subject = subject
-	log.Printf("GmailAPI --> \n"+
-		"\tGmailService: %v\n"+
-		"\tDelegatesService: %v\n"+
-		"\tUserEmail: %s\n", &receiver.GmailService, &receiver.DelegatesService, subject)
-	return receiver
+	newGmailAPI := &GmailAPI{}
+	newGmailAPI.GmailService = gmailService
+	newGmailAPI.Subject = subject
+	log.Printf("GmailAPI --> \nGmailService: %v, UserEmail: %s\n", &newGmailAPI.GmailService, subject)
+	return newGmailAPI
 }
 
 type GmailAPI struct {
-	GmailService     *gmail.Service
-	DelegatesService *gmail.UsersSettingsDelegatesService
-	Subject          string
-}
-
-type Delegate struct {
+	GmailService *gmail.Service
+	Subject      string
 }
 
 type GmailMessagePayload struct {
@@ -249,7 +238,7 @@ func (receiver *GmailAPI) SendRawEmail(to, cc, bcc []string, sender, subject, bo
 }
 
 func (receiver *GmailAPI) GetDelegates() []*gmail.Delegate {
-	response, err := receiver.DelegatesService.List(receiver.Subject).Do()
+	response, err := receiver.GmailService.Users.Settings.Delegates.List(receiver.Subject).Do()
 	if err != nil {
 		log.Println(err.Error())
 		return nil
