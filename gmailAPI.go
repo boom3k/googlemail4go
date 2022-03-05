@@ -243,13 +243,80 @@ func (receiver *GmailAPI) GetDelegates() []*gmail.Delegate {
 	return response.Delegates
 }
 
-func (receiver *GmailAPI) AddDelegate(newDelegates string) *gmail.Delegate {
-	response, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, &gmail.Delegate{DelegateEmail: newDelegates}).Do()
-	if err != nil {
-		log.Println(err.Error())
-		panic(err)
+func (receiver *GmailAPI) AddDelegate(newDelegates []string) error {
+	if len(newDelegates) == 1 {
+		_, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, &gmail.Delegate{DelegateEmail: newDelegates[0]}).Do()
+		return err
 	}
-	return response
+
+	maxExecutes := 10
+
+	for {
+		if len(newDelegates) < maxExecutes {
+			maxExecutes = len(newDelegates)
+		}
+
+		wg := &sync.WaitGroup{}
+		wg.Add(maxExecutes)
+
+		for _, newDelegateEmail := range newDelegates[:maxExecutes] {
+			go func() {
+				defer wg.Done()
+				newDelegate := &gmail.Delegate{DelegateEmail: newDelegateEmail}
+				_, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, newDelegate).Do()
+				if err != nil {
+					log.Println(err.Error())
+					panic(err)
+				}
+			}()
+		}
+		wg.Wait()
+
+		newDelegates := newDelegates[maxExecutes:]
+		if len(newDelegates) == 0 {
+			break
+		}
+	}
+
+	return nil
+
+}
+
+func (receiver *GmailAPI) RemoveDelegates(delegateEmails []string) error {
+	if len(delegateEmails) == 1 {
+		return receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, delegateEmails[0]).Do()
+	}
+
+	maxExecutes := 10
+	batchCounter := 1
+	for {
+		batchCounter++
+		if len(delegateEmails) < maxExecutes {
+			maxExecutes = len(delegateEmails)
+		}
+
+		wg := &sync.WaitGroup{}
+		wg.Add(maxExecutes)
+
+		for _, delegateEmail := range delegateEmails[:maxExecutes] {
+			go func() {
+				defer wg.Done()
+				err := receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, delegateEmail).Do()
+				if err != nil {
+					log.Println(err.Error())
+					panic(err)
+				}
+				log.Printf("Account: %s delegate [%s] removed\n", receiver.Subject, delegateEmail)
+			}()
+		}
+		wg.Wait()
+
+		delegateEmails := delegateEmails[maxExecutes:]
+		if len(delegateEmails) == 0 {
+			break
+		}
+	}
+	return nil
 }
 
 func (receiver *GmailAPI) GetMessageHeaders(query string) []GmailMessagePayload {
