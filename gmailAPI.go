@@ -24,7 +24,6 @@ func BuildNewGmailAPI(client *http.Client, subject string, ctx context.Context) 
 	newGmailAPI := &GmailAPI{}
 	newGmailAPI.GmailService = gmailService
 	newGmailAPI.Subject = subject
-	log.Printf("GmailAPI --> \nGmailService: %v, UserEmail: %s\n", &newGmailAPI.GmailService, subject)
 	return newGmailAPI
 }
 
@@ -311,14 +310,9 @@ func (receiver *GmailAPI) GetDelegates() []*gmail.Delegate {
 	return response.Delegates
 }
 
-func (receiver *GmailAPI) AddDelegate(newDelegates []string) error {
-	if len(newDelegates) == 1 {
-		_, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, &gmail.Delegate{DelegateEmail: newDelegates[0]}).Do()
-		return err
-	}
+func (receiver *GmailAPI) AddDelegates(newDelegates []string) error {
 
 	maxExecutes := 10
-
 	for {
 		if len(newDelegates) < maxExecutes {
 			maxExecutes = len(newDelegates)
@@ -327,16 +321,18 @@ func (receiver *GmailAPI) AddDelegate(newDelegates []string) error {
 		wg := &sync.WaitGroup{}
 		wg.Add(maxExecutes)
 
-		for _, newDelegateEmail := range newDelegates[:maxExecutes] {
-			go func() {
+		for _, email := range newDelegates[:maxExecutes] {
+			email = strings.Trim(email, " ")
+			go func(s string) {
 				defer wg.Done()
-				newDelegate := &gmail.Delegate{DelegateEmail: newDelegateEmail}
-				_, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, newDelegate).Do()
+				newDelegate := &gmail.Delegate{DelegateEmail: s}
+				_, err := receiver.GmailService.Users.Settings.Delegates.Create("me", newDelegate).Do()
 				if err != nil {
 					log.Println(err.Error())
 					panic(err)
 				}
-			}()
+				log.Printf("[%s] added delegate [%s]\n", receiver.Subject, s)
+			}(email)
 		}
 		wg.Wait()
 
@@ -350,11 +346,8 @@ func (receiver *GmailAPI) AddDelegate(newDelegates []string) error {
 
 }
 
-func (receiver *GmailAPI) RemoveDelegates(delegateEmails []string) error {
-	if len(delegateEmails) == 1 {
-		return receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, delegateEmails[0]).Do()
-	}
-
+func (receiver *GmailAPI) RemoveDelegates(delegateEmails []string, doit bool) error {
+	log.Printf("Removing %d delegate(s) from mailbox [%s]\n", len(delegateEmails), receiver.Subject)
 	maxExecutes := 10
 	batchCounter := 1
 	for {
@@ -366,16 +359,26 @@ func (receiver *GmailAPI) RemoveDelegates(delegateEmails []string) error {
 		wg := &sync.WaitGroup{}
 		wg.Add(maxExecutes)
 
-		for _, delegateEmail := range delegateEmails[:maxExecutes] {
-			go func() {
+		for _, email := range delegateEmails[:maxExecutes] {
+			email = strings.Trim(email, " ")
+			go func(s string) {
 				defer wg.Done()
-				err := receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, delegateEmail).Do()
-				if err != nil {
-					log.Println(err.Error())
-					panic(err)
+				if doit {
+					err := receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, s).Do()
+					if err != nil {
+						if strings.Contains(err.Error(), "Invalid delegate, notFound") {
+							log.Printf("[%s] is not delegated to [%s]\n", receiver.Subject, s)
+							return
+						}
+						log.Println(err.Error())
+						panic(err)
+					}
+					log.Printf("[%s] removed delegate [%s]\n", receiver.Subject, s)
+				} else {
+					log.Printf("[%s] would removed delegate [%s] if doit was set to true\n", receiver.Subject, s)
 				}
-				log.Printf("Account: %s delegate [%s] removed\n", receiver.Subject, delegateEmail)
-			}()
+
+			}(email)
 		}
 		wg.Wait()
 
