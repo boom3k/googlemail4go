@@ -366,7 +366,7 @@ func (receiver *GmailAPI) GetPayload(messageID string) GmailMessagePayload {
 
 	headersMap := make(map[string]string)
 	for _, header := range response.Payload.Headers {
-		log.Printf("%s: %s -> %v", messageID, header.Name, header.Value)
+		//log.Printf("%s: %s -> %v", messageID, header.Name, header.Value)
 		headersMap[strings.ToLower(header.Name)] = header.Value
 	}
 
