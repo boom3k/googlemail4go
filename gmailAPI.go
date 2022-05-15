@@ -3,8 +3,12 @@ package googlemail4go
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"github.com/thanhpk/randstr"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
@@ -15,7 +19,33 @@ import (
 	"sync"
 )
 
-func BuildNewGmailAPI(client *http.Client, subject string, ctx context.Context) *GmailAPI {
+func BuildApiUsingOAuth2(subject string, scopes []string, clientSecret, authorizationToken []byte, ctx context.Context) *GmailAPI {
+	config, err := google.ConfigFromJSON(clientSecret, scopes...)
+	if err != nil {
+		log.Println(err.Error())
+		panic(err)
+	}
+	token := &oauth2.Token{}
+	err = json.Unmarshal(authorizationToken, token)
+	if err != nil {
+		log.Println(err.Error())
+		panic(err)
+	}
+	client := config.Client(context.Background(), token)
+	return BuildAPI(client, subject, ctx)
+}
+
+func BuildApiUsingImpersonation(subject string, scopes []string, serviceAccountKey []byte, ctx context.Context) *GmailAPI {
+	jwt, err := google.JWTConfigFromJSON(serviceAccountKey, scopes...)
+	if err != nil {
+		log.Println(err.Error())
+		panic(err)
+	}
+	jwt.Subject = subject
+	return BuildAPI(jwt.Client(ctx), subject, ctx)
+}
+
+func BuildAPI(client *http.Client, subject string, ctx context.Context) *GmailAPI {
 	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Println(err.Error())
@@ -63,14 +93,6 @@ type GmailMessage struct {
 	Cc          []string
 	Bcc         []string
 	Attachments []EmailAttachment
-}
-
-func NewMessage(to []string, subject, body string) *GmailMessage {
-	return &GmailMessage{
-		To:      to,
-		Subject: subject,
-		Body:    body,
-	}
 }
 
 func (receiver *GmailAPI) QueryMessages(query string) []*gmail.Message {
@@ -130,25 +152,6 @@ func (receiver *GmailAPI) ExportEmail(rfc822MsgID string) ([]byte, []EmailAttach
 		html += strings.ReplaceAll(payload.Body, "/ < img[^ >]* > /", "")
 		html += "<hr />"
 	}
-
-	//for _, message := range messages {
-	//	payload := receiver.GetPayload(message.ThreadId)
-	//	log.Println(payload)
-	//	ts, _ := receiver.GmailService.Users.Threads.Get(receiver.Subject, message.ThreadId).Do()
-	//	log.Println(ts)
-	//	rawMessage, err := receiver.GmailService.Users.Messages.Get(receiver.Subject, message.ThreadId).Fields("*").Format("raw").Do()
-	//	if err != nil {
-	//		log.Println(err.Error())
-	//		panic(err)
-	//	}
-	//	log.Println(html)
-	//	emailBodyData, err = base64.URLEncoding.DecodeString(rawMessage.Raw)
-	//	if err != nil {
-	//		log.Println(err.Error())
-	//		panic(err)
-	//	}
-	//	attachments = append(attachments, receiver.GetMessageAttachments(message.ThreadId)...)
-	//}
 	return emailBodyData, attachments
 }
 
