@@ -3,7 +3,6 @@ module github.com/boom3k/googlemail4go
 go 1.17
 
 require (
-	github.com/thanhpk/randstr v1.0.4
 	golang.org/x/oauth2 v0.0.0-20220309155454-6242fa91716a
 	google.golang.org/api v0.74.0
 )

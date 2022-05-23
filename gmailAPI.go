@@ -1,25 +1,31 @@
 package googlemail4go
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/thanhpk/randstr"
-
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
-	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+	"io/ioutil"
 	"log"
 	"net/http"
-	"path/filepath"
+	"os"
 	"strings"
 	"sync"
 )
 
-func BuildApiUsingOAuth2(subject string, scopes []string, clientSecret, authorizationToken []byte, ctx context.Context) *GmailAPI {
+type GmailAPI struct {
+	GmailService *gmail.Service
+	UserEmail    string
+}
+
+func BuildGmail3kWithOAuth2(subject string, scopes []string, clientSecret, authorizationToken []byte, ctx context.Context) *GmailAPI {
 	config, err := google.ConfigFromJSON(clientSecret, scopes...)
 	if err != nil {
 		log.Println(err.Error())
@@ -32,20 +38,20 @@ func BuildApiUsingOAuth2(subject string, scopes []string, clientSecret, authoriz
 		panic(err)
 	}
 	client := config.Client(context.Background(), token)
-	return BuildAPI(client, subject, ctx)
+	return BuildGmail3k(client, subject, ctx)
 }
 
-func BuildApiUsingImpersonation(subject string, scopes []string, serviceAccountKey []byte, ctx context.Context) *GmailAPI {
+func BuildGmail3kWithImpersonator(subject string, scopes []string, serviceAccountKey []byte, ctx context.Context) *GmailAPI {
 	jwt, err := google.JWTConfigFromJSON(serviceAccountKey, scopes...)
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
 	}
 	jwt.Subject = subject
-	return BuildAPI(jwt.Client(ctx), subject, ctx)
+	return BuildGmail3k(jwt.Client(ctx), subject, ctx)
 }
 
-func BuildAPI(client *http.Client, subject string, ctx context.Context) *GmailAPI {
+func BuildGmail3k(client *http.Client, subject string, ctx context.Context) *GmailAPI {
 	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Println(err.Error())
@@ -53,357 +59,402 @@ func BuildAPI(client *http.Client, subject string, ctx context.Context) *GmailAP
 	}
 	newGmailAPI := &GmailAPI{}
 	newGmailAPI.GmailService = gmailService
-	newGmailAPI.Subject = subject
+	newGmailAPI.UserEmail = subject
 	log.Printf("GmailAPI --> \nGmailService: %v, UserEmail: %s\n", &newGmailAPI.GmailService, subject)
 	return newGmailAPI
 }
 
-type GmailAPI struct {
-	GmailService *gmail.Service
-	Subject      string
-}
-
-type GmailMessagePayload struct {
-	ThreadID        string
-	From            string
-	To              []string
-	Cc              []string
-	Bcc             []string
-	Subject         string
-	Rfc822MessageId string
-	Date            string
-	DeliveredTo     string
-	Received        string
-	Body            string
-	Attachments     []EmailAttachment
-}
-
-type EmailAttachment struct {
-	Filename   string
-	Extenstion string
-	Data       []byte
-	MimeType   string
-}
-
-type GmailMessage struct {
+type Draft struct {
+	From        string
+	SendAs      string
 	Body        string
-	FromName    string
 	Subject     string
 	To          []string
 	Cc          []string
 	Bcc         []string
-	Attachments []EmailAttachment
+	Attachments []*Attachment
 }
 
-func (receiver *GmailAPI) QueryMessages(query string) []*gmail.Message {
-	log.Println("User [" + receiver.Subject + "]: Gmail.Messages.List.Query{\"" + query + "\"}")
-	messagesListCall := receiver.
-		GmailService.
-		Users.
-		Messages.
-		List(receiver.Subject).
-		Q(query).
-		Fields("*").
-		IncludeSpamTrash(true).
-		MaxResults(500)
-	response := &gmail.ListMessagesResponse{}
-	pullMessages := func() []*gmail.Message {
-		response, _ = messagesListCall.Do()
-		var messagesReturned []*gmail.Message
-		for _, m := range response.Messages {
-			messagesReturned = append(messagesReturned, m)
-		}
-		return messagesReturned
+func (receiver *Draft) Send(gmail3k *GmailAPI) (*gmail.Message, error) {
+	return gmail3k.SendDraft(receiver)
+}
+
+func DraftEmail(to, cc, bcc []string, subject, body string) *Draft {
+	return &Draft{
+		To:      to,
+		Cc:      cc,
+		Bcc:     bcc,
+		Subject: subject,
+		Body:    body,
 	}
-	messages := pullMessages()
-	for response.NextPageToken != "" {
-		log.Println("Messages Thus Far: ", len(messages), "Current PageToken: ["+response.NextPageToken+"]")
-		messagesListCall.PageToken(response.NextPageToken)
-		messages = append(messages, pullMessages()...)
-	}
-	log.Println("User [" + receiver.Subject + "]: Gmail.Messages.List.Query{\"" + query + "\"} - Emails returned: " + fmt.Sprint(len(messages)))
-	return messages
 }
 
-func (receiver GmailAPI) GetMessageByRFC822MsgID(rfc822MsgID string) *gmail.Message {
-	return receiver.QueryMessages("rfc822msgid:" + rfc822MsgID)[0]
+type ExportedMessage struct {
+	Message     *gmail.Message
+	Data        []byte
+	ThreadId    string
+	Headers     map[string]string
+	Date        string
+	From        string
+	Body        *MessageBody
+	Subject     string
+	ReplyTo     string
+	To          []string
+	Cc          []string
+	Bcc         []string
+	Attachments []*Attachment
 }
 
-func (receiver *GmailAPI) ExportEmail(rfc822MsgID string) ([]byte, []EmailAttachment) {
-	html := ""
-	var emailBodyData []byte
-	var attachments []EmailAttachment
-	message := receiver.GetMessageByRFC822MsgID(rfc822MsgID)
-
-	//Get the threads using that message ID
-	threads, err := receiver.GmailService.Users.Threads.Get(receiver.Subject, message.ThreadId).Fields("*").Do()
+func (receiver *GmailAPI) ExportMessage(rfc822MsgID string) (*ExportedMessage, error) {
+	log.Println("User [" + receiver.UserEmail + "]: Gmail.Messages.List.Query{\"" + rfc822MsgID + "\"}")
+	messageList, err := receiver.Search("rfc822msgid:" + rfc822MsgID)
+	originalMessage, err := receiver.GmailService.Users.Messages.Get(receiver.UserEmail, messageList[0].Id).Do()
 	if err != nil {
 		log.Println(err.Error())
 		panic(err)
 	}
 
-	for _, message := range threads.Messages {
-		payload := receiver.GetPayload(message.Id)
-		html += "From: " + payload.From + "<br />"
-		html += "To: " + strings.Join(payload.To, ",") + "<br />"
-		html += "Date: " + payload.Date + "<br />"
-		html += "Subject: " + payload.Subject + "<br />"
-		html += "<hr />"
-		html += strings.ReplaceAll(payload.Body, "/ < img[^ >]* > /", "")
-		html += "<hr />"
+	headers := make(map[string]string)
+	for _, header := range originalMessage.Payload.Headers {
+		headers[header.Name] = header.Value
 	}
-	return emailBodyData, attachments
-}
 
-func (email *GmailMessage) Send(googleGmail *GmailAPI) (*gmail.Message, GmailMessagePayload) {
-	return googleGmail.SendMessage(email)
-}
-
-func (email *GmailMessage) AddAttachment(fileNameWithExtension string, data []byte) *GmailMessage {
-	email.Attachments = append(email.Attachments, EmailAttachment{
-		Filename:   fileNameWithExtension,
-		Data:       data,
-		MimeType:   http.DetectContentType(data),
-		Extenstion: filepath.Ext(fileNameWithExtension),
-	})
-	return email
-}
-
-func (receiver *GmailAPI) SendMessage(email *GmailMessage) (*gmail.Message, GmailMessagePayload) {
-	if email.To == nil {
-		log.Printf("No Recipients for email [%s]!!\n", email)
-	} else if email.Body == "" {
-		log.Printf("No Body in email [%s]!!\n", email)
-	} else if email.Subject == "" {
-		log.Printf("No subject for email [%s}!!\n", email)
+	rawMessageResponse, err := receiver.GmailService.Users.Messages.Get(receiver.UserEmail, originalMessage.Id).Format("raw").Do()
+	if err != nil {
+		log.Println(err.Error())
+		panic(err)
 	}
-	return receiver.SendRawEmail(email.To, email.Cc, email.Bcc, email.FromName, email.Subject, email.Body, email.Attachments)
+
+	decodedData, err := base64.URLEncoding.DecodeString(rawMessageResponse.Raw)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	exportedMessage := &ExportedMessage{}
+	exportedMessage.ThreadId = originalMessage.ThreadId
+	exportedMessage.Message = originalMessage
+	exportedMessage.Data = decodedData
+	exportedMessage.Headers = headers
+	exportedMessage.Date = exportedMessage.Headers["Date"]
+	exportedMessage.To = strings.Split(exportedMessage.Headers["To"], ",")
+	exportedMessage.Cc = strings.Split(exportedMessage.Headers["Cc"], ",")
+	exportedMessage.Bcc = strings.Split(exportedMessage.Headers["Bcc"], ",")
+	exportedMessage.From = exportedMessage.Headers["From"]
+	exportedMessage.ReplyTo = exportedMessage.Headers["Reply-To"]
+	exportedMessage.Subject = exportedMessage.Headers["Subject"]
+	exportedMessage.Body, err = GetBodyFromParts(originalMessage.Payload.Parts)
+	if err != nil {
+		log.Println(err.Error())
+		panic(err)
+	}
+	attachments, err := receiver.GetThreadAttachments(originalMessage.ThreadId)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+	exportedMessage.Attachments = attachments
+	return exportedMessage, nil
 }
 
-func (receiver *GmailAPI) SendRawEmail(to, cc, bcc []string, sender, subject, bodyHtml string, attachments []EmailAttachment) (*gmail.Message, GmailMessagePayload) {
-	message := &gmail.Message{}
+func (receiver *GmailAPI) Search(query string) ([]*gmail.Message, error) {
+	var messages []*gmail.Message
+	nextPageToken := ""
+	for {
+		listMessagesResponse, err := receiver.GmailService.Users.Messages.
+			List(receiver.UserEmail).
+			PageToken(nextPageToken).
+			Q(query).
+			Fields("*").
+			IncludeSpamTrash(true).Do()
+		if err != nil {
+			log.Println(err.Error())
+			return nil, err
+		}
 
-	boundary := randstr.Base64(32)
+		messages = append(messages, listMessagesResponse.Messages...)
+		nextPageToken = listMessagesResponse.NextPageToken
+		if nextPageToken == "" {
+			break
+		}
+	}
+	log.Println("UserEmail [" + receiver.UserEmail + "]: Gmail.Messages.List.Query{\"" + query + "\"} - Emails returned: " + fmt.Sprint(len(messages)))
+	return messages, nil
+}
+
+func (receiver *GmailAPI) GetMessage(rfc822MsgId string) (*gmail.Message, error) {
+	messages, err := receiver.Search("rfc822msgid:" + rfc822MsgId)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+	return messages[0], nil
+}
+
+type MessageBody struct {
+	Plain string
+	Html  string
+}
+
+func GetBodyFromParts(rootParts []*gmail.MessagePart) (*MessageBody, error) {
+	messageBody := &MessageBody{}
+	for _, part := range rootParts {
+		if part.MimeType == "multipart/alternative" {
+			for _, messagePart := range part.Parts {
+				body, err := base64.URLEncoding.DecodeString(messagePart.Body.Data)
+				if err != nil {
+					log.Println(err.Error())
+					return nil, err
+				}
+				switch messagePart.MimeType {
+				case "text/html":
+					messageBody.Html = string(body)
+				case "text/plain":
+					messageBody.Plain = string(body)
+				}
+			}
+		}
+	}
+	return messageBody, nil
+}
+
+func (receiver *GmailAPI) SendEmail(to, cc, bcc []string, sendAs, subject, body string, attachments []*Attachment) (*gmail.Message, error) {
+	boundary := _string(32, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/")
 	messageBody := "Content-Type: multipart/mixed; boundary=" + boundary + " \n" +
 		"MIME-Version: 1.0\n" +
 		"To: " + strings.Join(to, ",") + "\n" +
 		"CC: " + strings.Join(cc, ",") + "\n" +
 		"BCC: " + strings.Join(bcc, ",") + "\n" +
-		"From: " + sender + "<" + receiver.Subject + ">\n" +
-		"Subject: " + subject + "\n\n" +
+		"From: " + sendAs + "<" + receiver.UserEmail + ">\n" +
+		"UserEmail: " + subject + "\n\n" +
 		"--" + boundary + "\n" +
 		"Content-Type: text/html; charset=" + string('"') + "UTF-8" + string('"') + "\n" +
 		"MIME-Version: 1.0\n" +
 		"Content-Transfer-Encoding: 7bit\n\n" +
-		bodyHtml + "\n\n" +
+		body + "\n\n" +
 		"--" + boundary + "\n"
 
 	for i, attachment := range attachments {
 
-		log.Printf("Attaching file [%d] of [%d]: %s", i, len(attachments)-1, attachment.Filename)
-		messageBody += "Content-Type: " + attachment.MimeType + "; SendMessage=" + string('"') + attachment.Filename + string('"') + " \n" +
+		log.Printf("Attaching file [%d] of [%d]: %s", i, len(attachments)-1, attachment.Name)
+		messageBody += "Content-Type: " + http.DetectContentType(attachment.Data) + "; Send=" + string('"') + attachment.Name + string('"') + " \n" +
 			"MIME-Version: 1.0\n" +
 			"Content-Transfer-Encoding: base64\n" +
-			"Content-Disposition: attachment; filename=" + string('"') + attachment.Filename + string('"') + " \n" +
-			chunkSplit(base64.RawStdEncoding.EncodeToString(attachment.Data), 76, "\n") + "--" + boundary + "\n"
+			"Content-Disposition: attachment; filename=" + string('"') + attachment.Name + string('"') + " \n" +
+			_chunkSplit(base64.RawStdEncoding.EncodeToString(attachment.Data), 76, "\n") + "--" + boundary + "\n"
 	}
 
+	newMessage := &gmail.Message{}
 	rawMessage := []byte(messageBody)
-	message.Raw = base64.StdEncoding.EncodeToString(rawMessage)
-	message.Raw = strings.Replace(message.Raw, "/", "_", -1)
-	message.Raw = strings.Replace(message.Raw, "+", "-", -1)
-	message.Raw = strings.Replace(message.Raw, "=", "", -1)
+	newMessage.Raw = base64.StdEncoding.EncodeToString(rawMessage)
+	newMessage.Raw = strings.Replace(newMessage.Raw, "/", "_", -1)
+	newMessage.Raw = strings.Replace(newMessage.Raw, "+", "-", -1)
+	newMessage.Raw = strings.Replace(newMessage.Raw, "=", "", -1)
 	totalAttachments := 0
 	if attachments != nil {
 		totalAttachments += len(attachments)
 	}
 
-	log.Printf("Sending Email ->\nTo: %s\nFrom:%s<%s>\nSubject:%s\nTotal Attachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
+	log.Printf("Sending Draft ->\nTo: %s\nFrom:%s<%s>\nUserEmail:%s\nTotal Attachments_: %d", to, sendAs, receiver.UserEmail, subject, totalAttachments)
 
 	response, err := receiver.GmailService.
 		Users.
 		Messages.
-		Send(receiver.Subject, message).
+		Send(receiver.UserEmail, newMessage).
 		Fields("*").
 		Do()
 
 	if err != nil {
 		log.Println(err.Error())
-		panic(err)
+		return nil, err
 	}
 
-	log.Printf("GmailMessage sent ->\nTo: %s\nFrom:%s<%s>\nSubject:%s\nTotal Attachments: %d", to, sender, receiver.Subject, subject, totalAttachments)
+	log.Printf("Draft sent ->\nTo: %s\nFrom:%s<%s>\nUserEmail:%s\nTotal Attachments_: %d", to, sendAs, receiver.UserEmail, subject, totalAttachments)
 
-	return response, receiver.GetPayload(response.ThreadId)
+	return response, nil
 }
 
-func (receiver *GmailAPI) GetDelegates() []*gmail.Delegate {
-	response, err := receiver.GmailService.Users.Settings.Delegates.List(receiver.Subject).Do()
+func (receiver *GmailAPI) SendDraft(draft *Draft) (*gmail.Message, error) {
+	return receiver.SendEmail(draft.To, draft.Cc, draft.Bcc, draft.SendAs, draft.Subject, draft.Body, draft.Attachments)
+}
+
+//Delegates
+func (receiver *GmailAPI) GetDelegates() (map[string]string, error) {
+	response, err := receiver.GmailService.Users.Settings.Delegates.List(receiver.UserEmail).Do()
 	if err != nil {
 		log.Println(err.Error())
-		return nil
+		return nil, err
 	}
-	return response.Delegates
+	delegateMap := make(map[string]string)
+	for _, delegate := range response.Delegates {
+		delegateMap[delegate.DelegateEmail] = delegate.VerificationStatus
+	}
+	return delegateMap, nil
 }
 
-func (receiver *GmailAPI) AddDelegates(newDelegates []string) error {
-	if len(newDelegates) == 1 {
-		_, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, &gmail.Delegate{DelegateEmail: newDelegates[0]}).Do()
-		return err
+func (receiver *GmailAPI) AddDelegates(userList []string) (map[string]string, error) {
+	existingDelegates, err := receiver.GetDelegates()
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	for i, userEmail := range userList {
+		if existingDelegates[userEmail] != "" {
+			userList = append(userList[:i], userList[i+1:]...)
+			log.Printf("Mailbox [%s] already delegated to <%s>\n", receiver.UserEmail, userEmail)
+		}
 	}
 
 	maxExecutes := 10
-
 	for {
-		if len(newDelegates) < maxExecutes {
-			maxExecutes = len(newDelegates)
+		if len(userList) == 0 {
+			break
+		} else if len(userList) < maxExecutes {
+			maxExecutes = len(userList)
 		}
 
 		wg := &sync.WaitGroup{}
 		wg.Add(maxExecutes)
 
-		for _, newDelegateEmail := range newDelegates[:maxExecutes] {
+		for _, newDelegateEmail := range userList[:maxExecutes] {
 			go func() {
 				defer wg.Done()
+				if existingDelegates[newDelegateEmail] == "" {
+					return
+				}
 				newDelegate := &gmail.Delegate{DelegateEmail: newDelegateEmail}
-				_, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.Subject, newDelegate).Do()
+				response, err := receiver.GmailService.Users.Settings.Delegates.Create(receiver.UserEmail, newDelegate).Do()
+				log.Printf("Mailbox [%s] has been delegated to <%s>\n", receiver.UserEmail, response.DelegateEmail)
 				if err != nil {
 					log.Println(err.Error())
-					panic(err)
 				}
 			}()
 		}
 		wg.Wait()
 
-		newDelegates := newDelegates[maxExecutes:]
-		if len(newDelegates) == 0 {
-			break
-		}
+		userList = userList[maxExecutes:]
 	}
 
-	return nil
+	return receiver.GetDelegates()
 
 }
 
-func (receiver *GmailAPI) RemoveDelegates(delegateEmails []string) error {
-	if len(delegateEmails) == 1 {
-		return receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, delegateEmails[0]).Do()
+func (receiver *GmailAPI) RemoveDelegates(userList []string) (map[string]string, error) {
+	existingDelegates, err := receiver.GetDelegates()
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	for i, userEmail := range userList {
+		if existingDelegates[userEmail] == "" {
+			log.Printf("Mailbox [%s] is not delegated to <%s>\n", receiver.UserEmail, userEmail)
+			userList = append(userList[:i], userList[i+1:]...)
+		}
 	}
 
 	maxExecutes := 10
-	batchCounter := 1
 	for {
-		batchCounter++
-		if len(delegateEmails) < maxExecutes {
-			maxExecutes = len(delegateEmails)
+		if len(userList) < maxExecutes {
+			maxExecutes = len(userList)
 		}
 
 		wg := &sync.WaitGroup{}
 		wg.Add(maxExecutes)
 
-		for _, delegateEmail := range delegateEmails[:maxExecutes] {
+		for _, delegateEmail := range userList[:maxExecutes] {
 			go func() {
 				defer wg.Done()
-				err := receiver.GmailService.Users.Settings.Delegates.Delete(receiver.Subject, delegateEmail).Do()
+				err := receiver.GmailService.Users.Settings.Delegates.Delete(receiver.UserEmail, delegateEmail).Do()
 				if err != nil {
 					log.Println(err.Error())
 					panic(err)
 				}
-				log.Printf("Account: %s delegate [%s] removed\n", receiver.Subject, delegateEmail)
+				log.Printf("Mailbox [%s] has removed delegate <%s>\n", receiver.UserEmail, delegateEmail)
+				if err != nil {
+					log.Println(err.Error())
+					panic(err)
+				}
 			}()
 		}
 		wg.Wait()
 
-		delegateEmails := delegateEmails[maxExecutes:]
-		if len(delegateEmails) == 0 {
+		userList = userList[maxExecutes:]
+		if len(userList) == 0 {
 			break
 		}
 	}
-	return nil
+	return receiver.GetDelegates()
 }
 
-func (receiver *GmailAPI) GetMessageHeaders(query string) []GmailMessagePayload {
-	messages := receiver.QueryMessages(query)
-	var gmailMessagePayloads []GmailMessagePayload
-	counter := 0
-	maxRoutines := 1
-	totalItems := len(messages)
-	worker := func(gmailMessageID string, waitGroup *sync.WaitGroup) {
-		log.Println("Set [" + fmt.Sprint(counter) + "] of [" + fmt.Sprint(totalItems) + "]")
-		gmailMessagePayloads = append(gmailMessagePayloads, receiver.GetPayload(gmailMessageID))
-		waitGroup.Done()
-		counter++
+//Labels
+func (receiver *GmailAPI) GetAllLabels() ([]*gmail.Label, error) {
+	listLabelsResponse, labelsListErr := receiver.GmailService.Users.Labels.List(receiver.UserEmail).Do()
+	if labelsListErr != nil {
+		log.Println(labelsListErr.Error())
+		return nil, labelsListErr
 	}
-	for len(messages) != 0 {
-		if len(messages) < maxRoutines {
-			currentMessages := messages[:]
-			waitGroup := sync.WaitGroup{}
-			waitGroup.Add(len(currentMessages))
-			for i := range currentMessages {
-				go worker(currentMessages[i].Id, &waitGroup)
-			}
-			waitGroup.Wait()
-			break
-		} else {
-			currentMessages := messages[:maxRoutines]
-			waitGroup := sync.WaitGroup{}
-			waitGroup.Add(len(currentMessages))
-			for i := range currentMessages {
-				go worker(currentMessages[i].Id, &waitGroup)
-			}
-			waitGroup.Wait()
-			messages = append(messages[:0], messages[maxRoutines:]...)
-		}
-	}
-	return gmailMessagePayloads
+	return listLabelsResponse.Labels, nil
 }
 
-func (receiver *GmailAPI) GetPayload(messageID string) GmailMessagePayload {
-	log.Println("Pulling [" + receiver.Subject + "] Gmail MsgId: " + messageID)
-	response, err := receiver.GmailService.Users.Messages.Get(receiver.Subject, messageID).Fields("*").Do()
+func (receiver *GmailAPI) GetLabel(labelName string) (*gmail.Label, error) {
+	allLabels, err := receiver.GetAllLabels()
 	if err != nil {
-		ger := GetGoogleErrorResponse(err)
-		log.Println(ger.Message, ger.Details)
-		panic(err)
+		log.Println(err.Error())
+		return nil, err
 	}
 
-	headersMap := make(map[string]string)
-	for _, header := range response.Payload.Headers {
-		//log.Printf("%s: %s -> %v", messageID, header.Name, header.Value)
-		headersMap[strings.ToLower(header.Name)] = header.Value
+	var targetLabel *gmail.Label
+	for _, label := range allLabels {
+		if label.Name == labelName {
+			targetLabel = label
+		}
 	}
 
-	return GmailMessagePayload{
-		ThreadID:        messageID,
-		Body:            headersMap["body"],
-		From:            headersMap["from"],
-		To:              strings.Split(headersMap["to"], ","),
-		Cc:              strings.Split(headersMap["cc"], ","),
-		Bcc:             strings.Split(headersMap["bcc"], ","),
-		Subject:         headersMap["subject"],
-		Rfc822MessageId: headersMap["message-id"],
-		Date:            headersMap["date"],
-		DeliveredTo:     headersMap["delivered-to"],
-		Received:        headersMap["received"],
-		Attachments:     receiver.GetMessageAttachments(messageID),
-	}
+	return targetLabel, nil
 }
 
-func (receiver *GmailAPI) GetMessageAttachmentsByRFC822MGSID(rfc822MsgID string) []EmailAttachment {
-	var attachments []EmailAttachment
-	for _, message := range receiver.QueryMessages("rfc822msgid:" + rfc822MsgID) {
-		attachments = append(attachments, receiver.GetMessageAttachments(message.ThreadId)...)
-	}
-	return attachments
+//Attachments
+type Attachment struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
 }
 
-func (receiver *GmailAPI) GetMessageAttachments(threadId string) []EmailAttachment {
-	//Get message by its thread id
-	var attachments []EmailAttachment
-	response, err := receiver.GmailService.Users.Threads.Get(receiver.Subject, threadId).Fields("*").Do()
+func AttachmentFromPath(filePath string) *Attachment {
+	osFile, err := os.Open(filePath)
 	if err != nil {
 		log.Println(err.Error())
 		return nil
+	}
+
+	data, err := ioutil.ReadAll(osFile)
+	if err != nil {
+		log.Println(err.Error())
+		return nil
+	}
+	return &Attachment{
+		Name: osFile.Name(),
+		Data: data,
+	}
+}
+
+func (receiver *GmailAPI) GetMessageAttachmentsByRFC822MGSID(rfc822MsgID string) ([]*Attachment, error) {
+	message, err := receiver.ExportMessage(rfc822MsgID)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+	return receiver.GetThreadAttachments(message.ThreadId)
+}
+
+func (receiver *GmailAPI) GetThreadAttachments(threadId string) ([]*Attachment, error) {
+	//ExportMessage message by its thread id
+	var attachments []*Attachment
+	response, err := receiver.GmailService.Users.Threads.Get(receiver.UserEmail, threadId).Fields("*").Do()
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 	for _, message := range response.Messages {
 		for _, messagePart := range message.Payload.Parts {
@@ -412,7 +463,7 @@ func (receiver *GmailAPI) GetMessageAttachments(threadId string) []EmailAttachme
 					Users.
 					Messages.
 					Attachments.
-					Get(receiver.Subject, threadId, messagePart.Body.AttachmentId).
+					Get(receiver.UserEmail, threadId, messagePart.Body.AttachmentId).
 					Fields("*").
 					Do()
 				if err != nil {
@@ -425,44 +476,20 @@ func (receiver *GmailAPI) GetMessageAttachments(threadId string) []EmailAttachme
 					panic(err)
 				}
 				fileName := messagePart.Filename
-				attachment := &EmailAttachment{
-					Filename:   fileName,
-					Data:       data,
-					Extenstion: filepath.Ext(fileName),
-					MimeType:   http.DetectContentType(data),
+				emailAttachment := &Attachment{
+					Name: fileName,
+					Data: data,
 				}
-				attachments = append(attachments, *attachment)
+				attachments = append(attachments, emailAttachment)
 			}
 		}
-
 	}
-	return attachments
+	return attachments, nil
 }
 
-func (receiver *GmailAPI) GetLabel(labelName string) *gmail.Label {
-	for _, label := range receiver.GetAllLabels() {
-		if label.Name == labelName {
-			return label
-		}
-	}
-	return nil
-}
+//--------------------------------------------------------------------------------------------------------------------*/
 
-func (receiver *GmailAPI) GetAllLabels() []*gmail.Label {
-	listLabelsResponse, labelsListErr := receiver.GmailService.Users.Labels.List(receiver.Subject).Do()
-	if labelsListErr != nil {
-		log.Println(labelsListErr.Error())
-		panic(labelsListErr)
-	}
-
-	return listLabelsResponse.Labels
-}
-
-func GetGoogleErrorResponse(err error) *googleapi.Error {
-	return err.(*googleapi.Error)
-}
-
-func chunkSplit(body string, limit int, end string) string {
+func _chunkSplit(body string, limit int, end string) string {
 	var charSlice []rune
 
 	// push characters to slice
@@ -487,4 +514,29 @@ func chunkSplit(body string, limit int, end string) string {
 		}
 	}
 	return result
+}
+
+// _string generates a random string using only letters provided in the letters parameter
+// if user ommit letters parameters, this function will use defLetters instead
+func _string(n int, letters ...string) string {
+	var letterRunes []rune
+	if len(letters) == 0 {
+		letterRunes = []rune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	} else {
+		letterRunes = []rune(letters[0])
+	}
+
+	var bb bytes.Buffer
+	bb.Grow(n)
+	l := uint32(len(letterRunes))
+	// on each loop, generate one random rune and append to output
+	for i := 0; i < n; i++ {
+		b := make([]byte, 4)
+		_, err := rand.Read(b)
+		if err != nil {
+			panic(err)
+		}
+		bb.WriteRune(letterRunes[binary.BigEndian.Uint32(b)%l])
+	}
+	return bb.String()
 }
